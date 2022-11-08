@@ -1,0 +1,275 @@
+import os
+
+from os.path import join
+from nestly.scons import SConsWrap
+from nestly import Nest
+from SCons.Script import Environment, Command, AddOption
+
+Import('env')
+localenv = env.Clone()
+
+# Set up state
+nest = SConsWrap(Nest(), localenv['output'], alias_environment=localenv)
+
+# To run this properly
+# * Make sure the model is well calibrated -- like the nonparametric calibration curve is very close to the diagonal line,
+# otherwise score might do weird things, this requires a large enough isotonic calibration training dataset
+# * Noncontamination data should be large enough that the slope/intercept estimate are reasonably stable
+
+DO_BAYES = False
+DO_BAYES = True
+BATCH_SIZE = 10
+RETRAIN_BATCH_SIZE = 10
+ALARM_RATE = 0.2
+
+MODEL_TYPE_DICT = {
+    'rf_more': {
+        'script': 'data/mpog_ponv/generate_ponv_mdl_treat.R',
+        'n_unique': [2],
+        'n_train': 400,
+        'n_calibs': [200],
+        'max_time': [800],
+        'bayes_factor': 4,
+        'n_seeds': 1,
+    },
+    'rf_retrain': {
+        'script': 'data/mpog_ponv/generate_ponv_mdl_online.R',
+        'n_unique': [2],
+        'n_train': 450,
+        'n_calibs': [200],
+        'max_time': [800],
+        'bayes_factor': 4,
+        'n_seeds': 1,
+    },
+}
+
+nest.add(
+    'model_type',
+    [
+        'rf_more',
+        # 'rf_retrain',
+    ]
+)
+
+nest.add(
+    'n_calib',
+    lambda c: MODEL_TYPE_DICT[c['model_type']]['n_calibs'],
+    label_func=lambda c: "calib_%d" % c)
+
+nest.add(
+    'n_unique',
+    lambda c: MODEL_TYPE_DICT[c['model_type']]['n_unique'],
+    label_func=lambda c: "uniq_%d" % c)
+
+nest.add(
+    'max_time',
+    lambda c: MODEL_TYPE_DICT[c['model_type']]['max_time'],
+    label_func=lambda c: "max_time_%d" % c)
+
+nest.add_aggregate('agg_res_score', list)
+nest.add_aggregate('agg_res_bayes', list)
+nest.add(
+    'seed',
+    [1],
+    label_func=lambda c: "seed_%d" % c)
+
+@nest.add_target_with_env(localenv)
+def fit_model(env, outdir, c):
+    targets = [
+        join(outdir, 'ponv_dat.csv'),
+    ]
+    cmd = [
+        'Rscript',
+        MODEL_TYPE_DICT[c['model_type']]['script'],
+	    '${TARGETS[0]}',
+    ]
+    if c['model_type']  == "rf_more":
+        cmd += [
+            1,
+            c['seed'],
+            MODEL_TYPE_DICT[c['model_type']]['n_train'],
+            c['n_unique'],
+        ]
+    elif c['model_type'] == "rf_retrain":
+        cmd += [
+            1,
+            c['seed'],
+            MODEL_TYPE_DICT[c['model_type']]['n_train'],
+            c['n_unique'],
+            RETRAIN_BATCH_SIZE, # retrain batch size
+            1
+        ]
+
+    return env.Command(
+        targets,
+        [],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def assemble_data(env, outdir, c):
+    targets = [
+            join(outdir, 'ponv.pkl'),
+            join(outdir, 'ponv_log.txt'),
+    ]
+    cmd = [
+        'python assemble_ponv_data.py',
+        '--n-calib',
+        c['n_calib'],
+        '--outcome y',
+	    '--in-file ${SOURCES[0]}',
+	    '--out-file ${TARGETS[0]}',
+	    '--log ${TARGETS[1]}',
+    ]
+
+    return env.Command(
+        targets,
+        c['fit_model'],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def do_monitor_score(env, outdir, c):
+    cmd = [
+        'python do_score_monitor.py',
+        '--seed',
+        123 + c['seed'],
+        '--n-calib',
+        c['n_calib'],
+        '--max-time',
+        c['max_time'],
+        '--batch-size',
+        BATCH_SIZE,
+        '--norm',
+        'L1',
+        '--shift-scale',
+        'logit',
+        '--particle',
+        10,
+        '--confounder-start',
+        0,
+        '--confounder-end',
+        0,
+        # '--no-halt',
+        '--alarm-rate',
+        ALARM_RATE,
+        '--data-gen ${SOURCES[0]}',
+        '--out-chart ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+    ]
+    targets = [
+            join(outdir, 'res_score.csv'),
+            join(outdir, 'log_score.txt'),
+        ]
+    return env.Command(
+        targets,
+        [
+            c['assemble_data'][0],
+        ],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def plot_chart_score(env, outdir, c):
+    cmd = [
+        'python plot_ponv_chart.py',
+    	'--calib-offset',
+        c['n_calib'],
+    	'--time',
+        "${SOURCES[0]}",
+    	'--result ${SOURCES[1]}',
+    	'--out-csv ${TARGETS[0]}',
+        '--chart-stat ${TARGETS[1]}',
+        '--calibration ${TARGETS[2]}',
+        '--roc ${TARGETS[3]}',
+        '--log ${TARGETS[4]}',
+        ]
+    targets = [
+            join(outdir, 'chart_stat_score.csv'),
+            join(outdir, 'chart_stat_score_amia.png'),
+            join(outdir, 'calibration_score.png'),
+            join(outdir, 'roc_score.png'),
+            join(outdir, 'log_ponv_score.txt')
+        ]
+
+    c['agg_res_score'].append(targets[0])
+    return env.Command(
+        targets,
+        [
+            c['fit_model'][0],
+            c['do_monitor_score'][0],
+        ],
+        ' '.join(map(str, cmd)))
+
+
+@nest.add_target_with_env(localenv)
+def do_monitor_bayes(env, outdir, c):
+    if not DO_BAYES:
+        return 
+
+    cmd = [
+        'python do_bayesian_monitor.py',
+        '--seed',
+        123 + c['seed'],
+        '--n-calib',
+        c['n_calib'],
+        '--batch-size',
+        1,
+        '--max-time',
+        c['max_time'],
+        '--confounder-start',
+        1,
+        '--confounder-end',
+        1,
+        '--num-integrate-samples',
+        3000,
+        '--prior-shift-factor',
+        0.5,
+        '--alarm-rate',
+        ALARM_RATE,
+        '--data-gen ${SOURCES[0]}',
+        '--temp-file',
+        join("exp_ponv", outdir, 'tmp.json'),
+        '--out-chart ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+    ]
+    targets = [
+            join(outdir, 'res_bayes_sr50.csv'),
+            join(outdir, 'log_bayes_sr50.txt'),
+        ]
+    return env.Command(
+        targets,
+        [
+            c['assemble_data'][0],
+        ],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def plot_chart_bayes(env, outdir, c):
+    if not DO_BAYES:
+        return 
+    cmd = [
+        'python plot_ponv_chart.py',
+    	'--calib-offset',
+        c['n_calib'],
+    	'--time ${SOURCES[0]}',
+    	'--result ${SOURCES[1]}',
+    	'--out-csv ${TARGETS[0]}',
+        '--chart-stat-plot ${TARGETS[1]}',
+        '--calibration-plot ${TARGETS[2]}',
+        '--roc-plot ${TARGETS[3]}',
+        '--log ${TARGETS[4]}',
+        ]
+    targets = [
+            join(outdir, 'chart_stat_bayes.csv'),
+            join(outdir, 'chart_stat_bayes_amia.png'),
+            join(outdir, 'calibration_bayes.png'),
+            join(outdir, 'roc_bayes.png'),
+            join(outdir, 'log_ponv_bayes.txt')
+        ]
+    c['agg_res_bayes'].append(targets[0])
+
+    return env.Command(
+        targets,
+        [
+            c['fit_model'][0],
+            c['do_monitor_bayes'][0],
+        ],
+        ' '.join(map(str, cmd)))

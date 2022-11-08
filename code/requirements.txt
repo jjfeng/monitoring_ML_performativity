@@ -1,0 +1,9 @@
+numpy
+scipy
+scikit-learn
+pandas
+scons
+matplotlib
+seaborn
+cmdstanpy
+nestly

@@ -1,0 +1,437 @@
+from os.path import join
+from nestly.scons import SConsWrap
+from nestly import Nest
+from SCons.Script import Environment, Command, AddOption
+
+Import('env')
+localenv = env.Clone()
+
+# Set up state
+nest = SConsWrap(Nest(), localenv['output'], alias_environment=localenv)
+
+INIT_BATCH_SIZE = 200
+TOT_SIZE = 600
+SHIFT_TIME = 100
+
+# First coef is used as input to ML
+# Second coef is unmeasured confounder
+# Last is intercept
+PRE_NONZERO_COEFS = [2,1,1,1]
+SHIFT_NONZERO_COEFS = [-0.1,-0.02,0,0]
+NUM_NONZERO_COEFS = len(PRE_NONZERO_COEFS)
+NUM_ZERO_VARS = 4
+NUM_FEATURES = NUM_NONZERO_COEFS + NUM_ZERO_VARS
+PRE_BETA = ",".join(list(map(str, PRE_NONZERO_COEFS + NUM_ZERO_VARS * [0] + [2,0])))
+
+SIM_SETTINGS = {
+    "overdamped": {
+        "beta_shift_type": "risk",
+        "beta_shift": ",".join(list(map(str, SHIFT_NONZERO_COEFS + NUM_ZERO_VARS * [0] + [0, 0.08]))),
+        "prop_shift_type": "log_risk",
+        "pre_propensity_ml": ",".join(list(map(str, [0.8] + (NUM_FEATURES + 2) * [0]))),
+        "pre_propensity_unmeas": ",".join(list(map(str, (NUM_FEATURES + 1) * [0] + [1, -1]))),
+        "prop_shift":  ",".join(list(map(str, [0] + (NUM_FEATURES + 2) * [0]))),
+        "prop_shift_unmeas":  ",".join(list(map(str, [-0.5] + [0] * NUM_FEATURES + [1, 0]))),
+    },
+}
+
+ALARM_RATE = 0.1
+MONITOR_BATCH_SIZE = 10
+CHANGE_PROB = 0.5
+
+NUM_REPS = 40
+
+nest.add(
+    'family',
+    ["bernoulli"])
+
+nest.add(
+    'model_type',
+    ["logistic"])
+
+nest.add(
+    'n_train',
+    [2000],
+    label_func=lambda c: "ntrain_%d" % c)
+
+@nest.add_target_with_env(localenv)
+def generate_init_mdl(env, outdir, c):
+    cmd = [
+        'python generate_init_mdl.py',
+        '--seed',
+        0,
+        '--family',
+        c['family'],
+        '--max-features',
+        NUM_FEATURES,
+        '--model-type',
+        c['model_type'],
+        '--pre-beta',
+        PRE_BETA,
+        '--n-train',
+        c['n_train'],
+	    '--out ${TARGETS[0]}',
+	    '--log ${TARGETS[1]}',
+    ]
+    return env.Command(
+        [
+            join(outdir, 'init_mdl.pkl'),
+            join(outdir, 'init_mdl_log.txt')],
+        [],
+        ' '.join(map(str, cmd)))
+
+nest.add(
+    'sim_settings',
+    [
+        "overdamped"
+    ])
+
+nest.add(
+    'shift_scale',
+    ['risk'])
+
+nest.add_aggregate('agg_res_score_overlay', list)
+nest.add_aggregate('agg_res_bayes_overlay', list)
+nest.add_aggregate('selection_bias_agg', list)
+nest.add(
+    'propensity_shift_time',
+    [
+        SHIFT_TIME,
+        SHIFT_TIME + 200,
+        TOT_SIZE + 1,
+    ],
+    label_func=lambda c: "prop_shift_%s" % c)
+
+@nest.add_target_with_env(localenv)
+def generate_clinician(env, outdir, c):
+    targets = [
+        join(outdir, 'clinician.pkl'),
+    ]
+    cmd = [
+        'python generate_clinician.py',
+        '--pre-propensity-beta',
+        SIM_SETTINGS[c['sim_settings']]["pre_propensity_ml"],
+        '--pre-propensity-beta-unmeas',
+        SIM_SETTINGS[c['sim_settings']]["pre_propensity_unmeas"],
+        '--shift-propensity-beta=%s' % SIM_SETTINGS[c['sim_settings']]["prop_shift"],
+        '--shift-scale',
+        SIM_SETTINGS[c['sim_settings']]["prop_shift_type"],
+        '--shift-time',
+        c["propensity_shift_time"],
+	    '--out ${TARGETS[0]}',
+    ]
+    if c['propensity_shift_time'] < TOT_SIZE:
+        cmd += ['--shift-propensity-beta-unmeas=%s' % SIM_SETTINGS[c['sim_settings']]["prop_shift_unmeas"]]
+
+    return env.Command(
+        targets,
+        [],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def generate_data_generator(env, outdir, c):
+    targets = [
+            join(outdir, 'hospital.pkl'),
+    ]
+    cmd = [
+        'python generate_data_generator.py',
+        '--pre-beta',
+        PRE_BETA,
+        '--shift-scale',
+        SIM_SETTINGS[c['sim_settings']]['beta_shift_type'],
+        '--shift-beta=%s' % SIM_SETTINGS[c['sim_settings']]['beta_shift'],
+        '--shift-time',
+        SHIFT_TIME,
+	    '--model-dev ${SOURCES[0]}',
+	    '--clinician ${SOURCES[1]}',
+	    '--out ${TARGETS[0]}',
+    ]
+
+    return env.Command(
+        targets,
+        [
+            c["generate_init_mdl"][0],
+            c["generate_clinician"][0]
+        ],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def measure_additive_violation(env, outdir, c):
+    cmd = [
+        'python get_additive_violation.py',
+        '--seed',
+        0,
+        '--batch-size',
+        100000,
+        '--risk-grid',
+        '0.1,0.4,0.7',
+        '--max-time',
+        TOT_SIZE,
+        '--data-gen ${SOURCES[0]}',
+        '--plot-file ${TARGETS[0]}',
+        '--out-csv ${TARGETS[1]}',
+        '--log ${TARGETS[2]}',
+    ]
+    if c['propensity_shift_time'] < TOT_SIZE:
+        cmd += [
+            '--propensity-shift-time',
+            c['propensity_shift_time']]
+
+    targets = [
+            join(outdir, 'additive_violation.png'),
+            join(outdir, 'additive_violation.csv'),
+            join(outdir, 'violation_log.txt'),
+        ]
+    c['selection_bias_agg'].append({
+        'label': 't=%d' % c['propensity_shift_time'] if c['propensity_shift_time'] < TOT_SIZE else 'No violation',
+        'target': targets[1]
+    })
+    return env.Command(
+        targets,
+        c['generate_data_generator'],
+        ' '.join(map(str, cmd)))
+
+nest.add_aggregate('agg_res_score', list)
+nest.add_aggregate('agg_res_bayes', list)
+nest.add(
+    'seed',
+    range(NUM_REPS),
+    label_func=lambda c: "seed_%d" % c)
+
+@nest.add_target_with_env(localenv)
+def do_monitor_score(env, outdir, c):
+    cmd = [
+        'python run_script.py',
+        localenv['cluster'],
+        '${TARGETS[0]}',
+        'do_score_monitor.py',
+        '--seed',
+        123 + c['seed'],
+        '--norm',
+        'L1',
+        '--shift-scale',
+        c['shift_scale'],
+        '--confounder-start-idx',
+        0,
+        '--confounder-end-idx',
+        0,
+        '--batch-size',
+        MONITOR_BATCH_SIZE,
+        '--particle',
+        10,
+        '--n-calib',
+        INIT_BATCH_SIZE,
+        '--max-time',
+        TOT_SIZE,
+        '--alarm-rate',
+        ALARM_RATE,
+        '--data-gen ${SOURCES[0]}',
+        '--out-chart ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+    ]
+    targets = [
+            join(outdir, 'res_score.csv'),
+            join(outdir, 'log_score.txt'),
+        ]
+    c['agg_res_score'].append(targets[0])
+    return env.Command(
+        targets,
+        c['generate_data_generator'],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def do_monitor_bayes(env, outdir, c):
+   cmd = [
+       'python run_script.py',
+       localenv['cluster'],
+       '${TARGETS[0]}',
+       'do_bayesian_monitor.py',
+       '--seed',
+       123 + c['seed'],
+       '--confounder-start-idx',
+       0,
+       '--confounder-end-idx',
+       0,
+       '--batch-size',
+       1,
+       '--n-calib',
+       INIT_BATCH_SIZE,
+       '--max-time',
+       TOT_SIZE,
+       '--prior-shift-factor',
+       0.1,
+       '--alarm-rate',
+       ALARM_RATE,
+       '--shift-scale',
+       c['shift_scale'],
+       '--data-gen ${SOURCES[0]}',
+       '--temp-file',
+       join("simulation_additive_equiconf", outdir, 'tmp.json'),
+       '--out-chart ${TARGETS[0]}',
+       '--log-file ${TARGETS[1]}',
+   ]
+   targets = [
+           join(outdir, 'res_bayes_sr50.csv'),
+           join(outdir, 'log_bayes_sr50.txt'),
+       ]
+   c['agg_res_bayes'].append(targets[0])
+   return env.Command(
+       targets,
+       c['generate_data_generator'],
+       ' '.join(map(str, cmd)))
+
+nest.pop("seed")
+
+@nest.add_target_with_env(localenv)
+def plot_score(env, outdir, c):
+    if NUM_REPS > 1 and len(c['agg_res_score']):
+        res = '+'.join([join('simulation_additive_equiconf', a) for a in c['agg_res_score']])
+        cmd = [
+            'python plot_simulation_shift.py',
+            '--result-files',
+            res,
+            '--alarm-rate',
+            ALARM_RATE,
+            '--monitor-time',
+            TOT_SIZE,
+            '--csv ${TARGETS[0]}',
+            '--log ${TARGETS[1]}',
+	        '--plot ${TARGETS[2]}',
+            '--shift-time',
+            SHIFT_TIME,
+            ]
+        targets = [
+                join(outdir, 'alert_times_score.csv'),
+                join(outdir, 'log_agg_score.txt'),
+                join(outdir, 'plot_alarms_score.png'),
+            ]
+        c['agg_res_score_overlay'].append({
+            "label": "t=%d" % c['propensity_shift_time'] if c['propensity_shift_time'] < TOT_SIZE else 'No violation',
+            "target": targets[0]
+        })
+        return env.Command(
+            targets,
+            c['agg_res_score'],
+            ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def plot_bayes(env, outdir, c):
+    if NUM_REPS < 2:
+        return
+
+    res = '+'.join([join('simulation_additive_equiconf', a) for a in c['agg_res_bayes']])
+    cmd = [
+        'python plot_simulation_shift.py',
+        '--result-files',
+        res,
+        '--alarm-rate',
+        ALARM_RATE,
+        '--monitor-time',
+        TOT_SIZE,
+        '--csv ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+	    '--plot ${TARGETS[2]}',
+        '--shift-time',
+        SHIFT_TIME,
+    ]
+    targets = [
+            join(outdir, 'alert_times_bayes.csv'),
+            join(outdir, 'log_agg_bayes.txt'),
+            join(outdir, 'plot_alarms_bayes.png'),
+        ]
+    c['agg_res_bayes_overlay'].append({
+        "label": "t=%d" % c['propensity_shift_time'] if c['propensity_shift_time'] < TOT_SIZE else 'No violation',
+        "target": targets[0]
+    })
+
+    return env.Command(
+        targets,
+        c['agg_res_bayes'],
+        ' '.join(map(str, cmd)))
+
+nest.pop("propensity_shift_time")
+
+@nest.add_target_with_env(localenv)
+def plot_score_overlay(env, outdir, c):
+    res = '+'.join([join('simulation_additive_equiconf', a['target']) for a in c['agg_res_score_overlay']])
+    labels = ",".join([a['label'] for a in c['agg_res_score_overlay']])
+    if NUM_REPS < 2:
+        return
+    cmd = [
+        'python plot_simulation_shift_overlay.py',
+        '--aggregate-files',
+        res,
+        '--label-title',
+        'Violation',
+        '--labels',
+        '"%s"' % labels,
+        '--monitor-time',
+        "%d,%d,%d" % (TOT_SIZE, TOT_SIZE, TOT_SIZE),
+        '--shift-time',
+        SHIFT_TIME,
+        '--alarm-rate',
+        ALARM_RATE,
+	    '--plot ${TARGETS[0]}',
+        ]
+
+    return env.Command(
+        [
+            join(outdir, 'score_trust_overlay.png'),
+        ],
+        [a['target'] for a in c['agg_res_score_overlay']],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def plot_bayes_overlay(env, outdir, c):
+    res = '+'.join([join('simulation_additive_equiconf', a['target']) for a in c['agg_res_bayes_overlay']])
+    labels = ",".join([a['label'] for a in c['agg_res_bayes_overlay']])
+    if NUM_REPS < 2:
+        return
+    cmd = [
+        'python plot_simulation_shift_overlay.py',
+        '--aggregate-files',
+        res,
+        '--label-title',
+        'Violation',
+        '--labels',
+        '"%s"' % labels,
+        '--monitor-time',
+        "%d,%d,%d" % (TOT_SIZE, TOT_SIZE, TOT_SIZE),
+        '--shift-time',
+        SHIFT_TIME,
+        '--alarm-rate',
+        ALARM_RATE,
+	    '--plot ${TARGETS[0]}',
+        ]
+
+    return env.Command(
+        [
+            join(outdir, 'bayes_trust_overlay.png'),
+        ],
+        [a['target'] for a in c['agg_res_bayes_overlay']],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def plot_additive_violation(env, outdir, c):
+    res = '+'.join([join('simulation_additive_equiconf', a['target']) for a in c['selection_bias_agg']])
+    labels = ','.join([a['label'] for a in c['selection_bias_agg']])
+    cmd = [
+        'python plot_additive_violation_agg.py',
+        '--seed',
+        0,
+        '--shift-time',
+        SHIFT_TIME,
+        '--label',
+        '"%s"' % labels,
+        '--result',
+        res,
+        '--plot-file ${TARGETS[0]}',
+    ]
+
+    targets = [
+            join(outdir, 'additive_violation.png'),
+        ]
+    return env.Command(
+        targets,
+        [a['target'] for a in c['selection_bias_agg']],
+        ' '.join(map(str, cmd)))

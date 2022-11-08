@@ -1,0 +1,554 @@
+import os
+
+from os.path import join
+from nestly.scons import SConsWrap
+from nestly import Nest
+from SCons.Script import Environment, Command, AddOption
+
+Import('env')
+localenv = env.Clone()
+
+nest = SConsWrap(Nest(), localenv['output'], alias_environment=localenv)
+
+NONZERO_COEFS = [2,1,1]
+SIM_SETTINGS = {
+    "high_dim_xgb": {
+        "seed": 5,
+        "start_confounder": 0,
+        "end_confounder": 0,
+        "pre_prop": ",".join(list(map(str, [0.5, 0]))),
+        "shift_prop": ",".join(list(map(str, [0., 0]))),
+        "num_p": 50,
+        "test_size": 200,
+        "train_data_rate_calib": 0,
+        "train_data_rate_monitor": 1,
+        "n_train": 400,
+        "init_calib": 200,
+        "model_type": 'xgb',
+    },
+    "high_dim_ridge": {
+        "seed": 15,
+        "start_confounder": 0,
+        "end_confounder": 0,
+        "pre_prop": ",".join(list(map(str, [0.5, 0]))),
+        "shift_prop": ",".join(list(map(str, [0., 0]))),
+        "num_p": 50,
+        "test_size": 0,
+        "train_data_rate_calib": 0,
+        "train_data_rate_monitor": 1,
+        "n_train": 300,
+        "init_calib": 200,
+        "model_type": 'ridge',
+    },
+}
+REFIT_FREQ = 20
+ALARM_RATE = 0.1
+NUM_REPS = 200
+
+nest.add(
+    'family',
+    ["bernoulli"])
+
+nest.add(
+    'setting',
+    [
+        'high_dim_ridge',
+        'high_dim_xgb',
+    ])
+
+nest.add(
+    'unbias_training',
+    [
+        False,
+        # True
+    ])
+
+nest.add(
+    'tot_size_factor',
+    [
+        4
+    ],
+    label_func=lambda c: "tot_size_%.2f" % c,
+)
+
+@nest.add_target_with_env(localenv)
+def generate_clinician(env, outdir, c):
+    targets = [
+            join(outdir, 'clinician.pkl'),
+    ]
+    cmd = [
+        'python generate_clinician.py',
+        '--pre-propensity-beta',
+        SIM_SETTINGS[c["setting"]]["pre_prop"],
+        # '--shift-propensity-beta="%s"' % SIM_SETTINGS[c['setting']]["shift_prop"],
+        # '--shift-time',
+        # int(0.5 * c['tot_size_factor'] * SIM_SETTINGS[c['setting']]['init_calib']),
+        '--shift-scale',
+        'logit',
+	    '--out ${TARGETS[0]}',
+    ]
+
+    return env.Command(
+        targets,
+        [],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def generate_init_mdl(env, outdir, c):
+    pre_beta = ",".join(list(map(str, NONZERO_COEFS + (SIM_SETTINGS[c['setting']]['num_p'] - len(NONZERO_COEFS) + 1) * [0])))
+    cmd = [
+        #'python run_script.py',
+        #localenv['cluster'],
+        #'${TARGETS[0]}',
+        'python generate_init_mdl.py',
+        '--seed',
+        SIM_SETTINGS[c['setting']]['seed'],
+        '--family',
+        c['family'],
+        '--model-type',
+        SIM_SETTINGS[c['setting']]['model_type'],
+        '--max-features',
+        SIM_SETTINGS[c['setting']]['num_p'],
+        '--pre-beta',
+        pre_beta,
+        '--test-size %d' % SIM_SETTINGS[c['setting']]['test_size'] if SIM_SETTINGS[c['setting']]['test_size'] else '',
+        '--refit-freq',
+        REFIT_FREQ,
+        '--max-train',
+        0,
+        '--n-train',
+        SIM_SETTINGS[c['setting']]['n_train'],
+	    '--out ${TARGETS[0]}',
+	    '--log ${TARGETS[1]}',
+	    '--calib ${TARGETS[2]}',
+	    '--roc ${TARGETS[3]}',
+    ]
+    return env.Command(
+        [
+            join(outdir, 'init_mdl.pkl'),
+            join(outdir, 'init_mdl_log.txt'),
+            join(outdir, 'init_calib.png'),
+            join(outdir, 'init_roc.png')],
+        [],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def generate_data_gen(env, outdir, c):
+    pre_beta = ",".join(list(map(str, NONZERO_COEFS + (SIM_SETTINGS[c['setting']]['num_p'] - len(NONZERO_COEFS) + 1) * [0])))
+    targets = [
+            join(outdir, 'hospital.pkl'),
+    ]
+    cmd = [
+        #'python run_script.py',
+        #localenv['cluster'],
+        #'${TARGETS[0]}',
+        'python generate_data_generator.py',
+        '--pre-beta',
+        pre_beta,
+        '--train-data-rate-monitor',
+        SIM_SETTINGS[c['setting']]['train_data_rate_monitor'],
+        '--train-data-rate-calib',
+        SIM_SETTINGS[c['setting']]['train_data_rate_calib'],
+        '--do-unbiased-training' if c['unbias_training'] else '',
+	    '--model-dev ${SOURCES[0]}',
+	    '--clinician ${SOURCES[1]}',
+	    '--out ${TARGETS[0]}',
+    ]
+
+    return env.Command(
+        targets,
+        [
+            c['generate_init_mdl'][0],
+            c['generate_clinician'][0],
+        ],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def plot_init_calib(env, outdir, c):
+    cmd = [
+        'python plot_risk_v_pred.py',
+        '--test-size',
+        10000,
+        '--scale',
+        'risk,logit',
+        '--data-gen ${SOURCES[0]}',
+        '--plot ${TARGETS[0]}',
+    ]
+    targets = [
+            join(outdir, 'init_calibration.png'),
+        ]
+    return env.Command(
+        targets,
+        [
+            c['generate_data_gen'][0],
+        ],
+        ' '.join(map(str, cmd)))
+
+
+nest.add(
+    'batch_size',
+    [10],
+    label_func=lambda c: "batch_%d" % c)
+
+nest.add_aggregate('agg_res_score_overlay', list)
+nest.add_aggregate('agg_res_bayes_overlay', list)
+nest.add(
+    'shift_scale',
+    [
+        'logit',
+        'risk',
+    ])
+
+nest.add(
+    'max_look_back',
+    [
+        0
+    ],
+    label_func=lambda c: "look_back_%d" % c,
+)
+
+
+nest.add(
+    'oracle',
+    [
+        'none',
+    ])
+
+nest.add(
+    'norm',
+    [
+        'L1',
+        # 'inf',
+    ])
+
+nest.add_aggregate('agg_res_score', list)
+nest.add_aggregate('agg_res_bayes', list)
+nest.add_aggregate('agg_res_aucs', list)
+nest.add(
+    'seed',
+    range(NUM_REPS),
+    label_func=lambda c: "seed_%d" % c)
+
+
+@nest.add_target_with_env(localenv)
+def do_score_monitor(env, outdir, c):
+    cmd = [
+        'python run_script.py',
+        localenv['cluster'],
+        '${TARGETS[0]}',
+        'do_score_monitor.py',
+        '--seed',
+        123 + c['seed'],
+        '--norm',
+        c['norm'],
+        '--oracle',
+        c['oracle'],
+        '--max-look',
+        c['max_look_back']//c['batch_size'],
+        '--n-calib',
+        SIM_SETTINGS[c['setting']]['init_calib'],
+        '--batch-size',
+        c['batch_size'],
+        '--shift-scale',
+        c['shift_scale'],
+        '--particles',
+        5,
+        '--max-time',
+        int(c['tot_size_factor'] * SIM_SETTINGS[c['setting']]['init_calib']),
+        '--confounder-start',
+        SIM_SETTINGS[c['setting']]['start_confounder'],
+        '--confounder-end',
+        SIM_SETTINGS[c['setting']]['end_confounder'],
+        '--alarm-rate',
+        ALARM_RATE,
+        '--data-gen ${SOURCES[0]}',
+        '--out-chart ${TARGETS[0]}',
+        '--out-mdls ${TARGETS[1]}',
+        '--log ${TARGETS[2]}',
+    ]
+    targets = [
+            join(outdir, 'res_score.csv'),
+            join(outdir, 'mdl_hist.pkl'),
+            join(outdir, 'log_score.txt'),
+        ]
+    c['agg_res_score'].append(targets[0])
+    return env.Command(
+        targets,
+        [
+            c['generate_data_gen'][0],
+        ],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def get_auc(env, outdir, c):
+    if c['seed'] > 2:
+        return
+
+    cmd = [
+        'python run_script.py',
+        localenv['cluster'],
+        '${TARGETS[0]}',
+        'plot_roc_chart.py',
+    	'--data-gen ${SOURCES[0]}',
+    	'--mdl ${SOURCES[1]}',
+    	'--out-auc ${TARGETS[0]}',
+        ]
+    targets = [
+            join(outdir, 'aucs.csv'),
+        ]
+    c['agg_res_aucs'].append(targets[0])
+    return env.Command(
+        targets,
+        [
+            c['generate_data_gen'][0],
+            c['do_score_monitor'][1],
+        ],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def plot_risk_v_pred(env, outdir, c):
+    if c['seed'] >= 5:
+        return
+
+    cmd = [
+        'python plot_risk_v_pred.py',
+        '--plot-mod',
+        50,
+        '--test-size',
+        10000,
+        '--scale',
+        'risk,logit',
+        '--data-gen ${SOURCES[0]}',
+        '--mdls ${SOURCES[1]}',
+        '--plot ${TARGETS[0]}',
+    ]
+    targets = [
+            join(outdir, 'calibration.png'),
+        ]
+    return env.Command(
+        targets,
+        [
+            c['generate_data_gen'][0],
+            c['do_score_monitor'][1],
+        ],
+        ' '.join(map(str, cmd)))
+
+
+@nest.add_target_with_env(localenv)
+def plot_chart_score(env, outdir, c):
+    if c['seed'] > 2:
+        return
+
+    cmd = [
+        'python run_script.py',
+        localenv['cluster'],
+        '${TARGETS[0]}',
+        'plot_chart.py',
+    	'--result ${SOURCES[0]}',
+    	'--chart-stat ${TARGETS[0]}',
+        ]
+    targets = [
+            join(outdir, 'chart_stat_score.png'),
+        ]
+    return env.Command(
+        targets,
+        [
+            c['do_score_monitor'][0],
+        ],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def do_monitor_bayes(env, outdir, c):
+    cmd = [
+        'python run_script.py',
+        localenv['cluster'],
+        '${TARGETS[0]}',
+        'do_bayesian_monitor.py',
+        '--seed',
+        123 + c['seed'],
+        '--n-calib',
+        SIM_SETTINGS[c['setting']]['init_calib'],
+        '--batch-size',
+        1,
+        '--max-time',
+        int(c['tot_size_factor'] * SIM_SETTINGS[c['setting']]['init_calib']),
+        '--confounder-start',
+        0,
+        '--confounder-end',
+        0,
+        '--shift-scale',
+        c['shift_scale'],
+        '--num-integrate-samples',
+        3000,
+        '--prior-shift-factor',
+        0.5,
+        '--alarm-rate',
+        ALARM_RATE,
+        '--data-gen ${SOURCES[0]}',
+        '--temp-file',
+        join("simulation_null_retrain", outdir, 'tmp.json'),
+        '--out-chart ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+    ]
+    targets = [
+            join(outdir, 'res_bayes.csv'),
+            join(outdir, 'log_bayes.txt'),
+        ]
+    c['agg_res_bayes'].append(targets[0])
+    return env.Command(
+        targets,
+        [
+            c['generate_data_gen'][0],
+        ],
+        ' '.join(map(str, cmd)))
+
+nest.pop("seed")
+
+@nest.add_target_with_env(localenv)
+def plot_aucs(env, outdir, c):
+    if len(c['agg_res_aucs']) == 0:
+        return
+
+    res = '+'.join([join('simulation_null_retrain', a) for a in c['agg_res_aucs']])
+    cmd = [
+        'python plot_aucs.py',
+        '--result-files',
+        res,
+	    '--plot ${TARGETS[0]}',
+        ]
+
+    return env.Command(
+        [
+            join(outdir, 'aucs.png'),
+        ],
+        c['agg_res_aucs'],
+        ' '.join(map(str, cmd)))
+
+
+@nest.add_target_with_env(localenv)
+def plot_score(env, outdir, c):
+    if NUM_REPS <= 1:
+        return 
+
+    res = '+'.join([join('simulation_null_retrain', a) for a in c['agg_res_score']])
+    cmd = [
+        'python plot_simulation_shift.py',
+        '--alarm',
+        ALARM_RATE,
+        '--result-files',
+        res,
+        '--monitor-time',
+        int(c['tot_size_factor'] * SIM_SETTINGS[c['setting']]['init_calib']),
+        '--csv ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+	    '--plot ${TARGETS[2]}',
+        ]
+    targets = [
+            join(outdir, 'score_alert_times.csv'),
+            join(outdir, 'log_agg_score.txt'),
+            join(outdir, 'plot_null_score.png'),
+        ]
+    c['agg_res_score_overlay'].append({
+        "label": c['shift_scale'].capitalize(),
+        "target": targets[0]})
+    return env.Command(
+        targets,
+        c['agg_res_score'],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def plot_bayes(env, outdir, c):
+    if len(c['agg_res_bayes']) <= 1:
+        return 
+
+    res = '+'.join([join('simulation_null_retrain', a) for a in c['agg_res_bayes']])
+    cmd = [
+        'python plot_simulation_shift.py',
+        '--alarm',
+        ALARM_RATE,
+        '--result-files',
+        res,
+        '--monitor-time',
+        int(c['tot_size_factor'] * SIM_SETTINGS[c['setting']]['init_calib']),
+        '--csv ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+	    '--plot ${TARGETS[2]}',
+        ]
+    targets = [
+            join(outdir, 'bayes_alert_times.csv'),
+            join(outdir, 'log_agg_bayes.txt'),
+            join(outdir, 'plot_null_bayes.png'),
+        ]
+    c['agg_res_bayes_overlay'].append({
+        "label": c['shift_scale'].capitalize(),
+        "target": targets[0]})
+    return env.Command(
+        targets,
+        c['agg_res_bayes'],
+        ' '.join(map(str, cmd)))
+
+nest.pop("shift_scale")
+
+@nest.add_target_with_env(localenv)
+def plot_score_overlay(env, outdir, c):
+    if NUM_REPS <= 1:
+        return
+    res = '+'.join([join('simulation_null_retrain', a['target']) for a in c['agg_res_score_overlay']])
+    labels = ",".join([a['label'] for a in c['agg_res_score_overlay']])
+    cmd = [
+        'python plot_simulation_shift_overlay.py',
+        '--aggregate-files',
+        res,
+        '--shift-time',
+        810, # this is just to make sure we dont plot the desired false alarm rate
+        '--label-title',
+        '"Shift scale"',
+        '--labels',
+        labels,
+        '--alarm-rate',
+        ALARM_RATE,
+        '--monitor-time',
+        ",".join(["800"] * len(c['agg_res_score_overlay'])),
+        '--log ${TARGETS[0]}',
+	    '--plot ${TARGETS[1]}',
+        ]
+
+    return env.Command(
+        [
+            join(outdir, 'log_agg_score_overlay.txt'),
+            join(outdir, 'plot_alarms_score_overlay.png'),
+        ],
+        [a['target'] for a in c['agg_res_score_overlay']],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def plot_bayes_overlay(env, outdir, c):
+    if NUM_REPS <= 1:
+        return
+    res = '+'.join([join('simulation_null_retrain', a['target']) for a in c['agg_res_bayes_overlay']])
+    labels = ",".join([a['label'] for a in c['agg_res_bayes_overlay']])
+    cmd = [
+        'python plot_simulation_shift_overlay.py',
+        '--aggregate-files',
+        res,
+        '--shift-time',
+        810, # this is just to make sure we dont plot the desired false alarm rate
+        '--label-title',
+        '"Shift scale"',
+        '--labels',
+        labels,
+        '--alarm-rate',
+        ALARM_RATE,
+        '--monitor-time',
+        ",".join(["800"] * len(c['agg_res_bayes_overlay'])),
+        '--log ${TARGETS[0]}',
+	    '--plot ${TARGETS[1]}',
+        ]
+
+    return env.Command(
+        [
+            join(outdir, 'log_agg_bayes_overlay.txt'),
+            join(outdir, 'plot_alarms_bayes_overlay.png'),
+        ],
+        [a['target'] for a in c['agg_res_bayes_overlay']],
+        ' '.join(map(str, cmd)))

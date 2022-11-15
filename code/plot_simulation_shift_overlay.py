@@ -70,9 +70,10 @@ def plot_alert_times(
 
     if standardize_x:
         plt.xlim(0, 1)
+        ax.set_xlabel(r"Relative alarm time (t/mK)")
     else:
         plt.xlim(0, end_time + 1)
-    ax.set_xlabel("Alarm time")
+        ax.set_xlabel("Alarm time")
     plt.tight_layout()
     sns.despine()
 

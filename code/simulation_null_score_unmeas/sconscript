@@ -33,9 +33,9 @@ SIM_SETTINGS = {
         "start_confounder": TOT_VARS,
         "end_confounder": TOT_VARS + 1,
         "pre_prop_unmeas": ",".join(list(map(str, [0] * (TOT_VARS + 1) + [0,1, -2]))),
-        "pre_prop_ml": ",".join(list(map(str, [0.2] + [0] * TOT_VARS + [1,0, 0]))),
+        "pre_prop_ml": ",".join(list(map(str, [0.2] + [0] * TOT_VARS + [0.3,0, 0]))),
         # increase dependence on ML
-        "shift_prop_ml": ",".join(list(map(str, [0.2] + [0] * TOT_VARS + [1,0, 0]))),
+        "shift_prop_ml": ",".join(list(map(str, [0.2] + [0] * TOT_VARS + [0.3,0, 0]))),
         "calibs": [50,100,200],
     },
 }
@@ -165,11 +165,11 @@ nest.add(
         'risk',
     ])
 
-nest.add(
-    'oracle',
-    [
-        'none',
-    ])
+#nest.add(
+#    'oracle',
+#    [
+#        'none',
+#    ])
 
 nest.add(
     'norm',
@@ -195,8 +195,8 @@ def do_score_monitor(env, outdir, c):
         123 + c['seed'],
         '--norm',
         c['norm'],
-        '--oracle',
-        c['oracle'],
+        #'--oracle',
+        #c['oracle'],
         '--n-calib',
         c['init_calib'],
         '--batch-size',

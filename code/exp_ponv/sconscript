@@ -16,7 +16,6 @@ nest = SConsWrap(Nest(), localenv['output'], alias_environment=localenv)
 # otherwise score might do weird things, this requires a large enough isotonic calibration training dataset
 # * Noncontamination data should be large enough that the slope/intercept estimate are reasonably stable
 
-DO_BAYES = False
 DO_BAYES = True
 BATCH_SIZE = 10
 RETRAIN_BATCH_SIZE = 10
@@ -47,7 +46,7 @@ nest.add(
     'model_type',
     [
         'rf_more',
-        # 'rf_retrain',
+        'rf_retrain',
     ]
 )
 
@@ -66,6 +65,7 @@ nest.add(
     lambda c: MODEL_TYPE_DICT[c['model_type']]['max_time'],
     label_func=lambda c: "max_time_%d" % c)
 
+nest.add_aggregate('agg_res_ipw', list)
 nest.add_aggregate('agg_res_score', list)
 nest.add_aggregate('agg_res_bayes', list)
 nest.add(
@@ -273,3 +273,71 @@ def plot_chart_bayes(env, outdir, c):
             c['do_monitor_bayes'][0],
         ],
         ' '.join(map(str, cmd)))
+
+# @nest.add_target_with_env(localenv)
+# def do_monitor_ipw(env, outdir, c):
+#     cmd = [
+#         'python do_cusum_ipw_monitor.py',
+#         '--seed',
+#         123 + c['seed'],
+#         '--n-calib',
+#         c['n_calib'],
+#         '--max-time',
+#         c['max_time'],
+#         '--batch-size',
+#         BATCH_SIZE,
+#         '--particle',
+#         10,
+#         '--confounder-start',
+#         0,
+#         '--confounder-end',
+#         0,
+#         # '--no-halt',
+#         '--alarm-rate',
+#         ALARM_RATE,
+#         '--data-gen ${SOURCES[0]}',
+#         '--out-chart ${TARGETS[0]}',
+#         '--log ${TARGETS[1]}',
+#     ]
+#     targets = [
+#             join(outdir, 'res_ipw.csv'),
+#             join(outdir, 'log_ipw.txt'),
+#         ]
+#     return env.Command(
+#         targets,
+#         [
+#             c['assemble_data'][0],
+#         ],
+#         ' '.join(map(str, cmd)))
+
+# @nest.add_target_with_env(localenv)
+# def plot_chart_ipw(env, outdir, c):
+#     cmd = [
+#         'python plot_ponv_chart.py',
+#     	'--calib-offset',
+#         c['n_calib'],
+#     	'--time ${SOURCES[0]}',
+#     	'--result ${SOURCES[1]}',
+#     	'--out-csv ${TARGETS[0]}',
+#         '--chart-stat-plot ${TARGETS[1]}',
+#         '--calibration-plot ${TARGETS[2]}',
+#         '--roc-plot ${TARGETS[3]}',
+#         '--log ${TARGETS[4]}',
+#         ]
+#     targets = [
+#             join(outdir, 'chart_stat_ipw.csv'),
+#             join(outdir, 'chart_stat_ipw_amia.png'),
+#             join(outdir, 'calibration_ipw.png'),
+#             join(outdir, 'roc_ipw.png'),
+#             join(outdir, 'log_ponv_ipw.txt')
+#         ]
+#     c['agg_res_ipw'].append(targets[0])
+
+#     return env.Command(
+#         targets,
+#         [
+#             c['fit_model'][0],
+#             c['do_monitor_ipw'][0],
+#         ],
+#         ' '.join(map(str, cmd)))
+

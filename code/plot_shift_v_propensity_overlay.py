@@ -18,6 +18,11 @@ import seaborn as sns
 from data_generator import DataGenerator
 from common import *
 
+TRUST_LABEL_DICT = {
+    'None': 'Low',
+    'Calibrated': 'Med',
+    'Over': 'High',
+}
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot shift versus propensity")
@@ -29,7 +34,7 @@ def parse_args():
     args = parser.parse_args()
     args.batch_size = 10000
     args.data_generator_files = args.data_generator_files.split("+")
-    args.labels = args.labels.split(",")
+    args.labels = [TRUST_LABEL_DICT[l] for l in args.labels.split(",")]
     return args
 
 def main():

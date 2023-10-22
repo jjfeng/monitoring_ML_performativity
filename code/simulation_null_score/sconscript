@@ -35,7 +35,7 @@ SIM_SETTINGS = {
 
 NUM_FEATURES = TOT_VARS
 ALARM_RATE = 0.1
-NUM_REPS = 200
+NUM_REPS = 40 # 200
 
 nest.add(
     'family',
@@ -95,6 +95,7 @@ nest.add(
     label_func=lambda c: "tot_size_%.2f" % c,
 )
 
+nest.add_aggregate('agg_res_ipw_overlay', list)
 nest.add_aggregate('agg_res_score_overlay', list)
 nest.add(
     'init_calib',
@@ -169,6 +170,7 @@ nest.add(
         'L1',
     ])
 
+nest.add_aggregate('agg_res_ipw', list)
 nest.add_aggregate('agg_res_score', list)
 nest.add_aggregate('agg_res_bayes', list)
 nest.add(
@@ -214,6 +216,45 @@ def do_score_monitor(env, outdir, c):
             join(outdir, 'log_score.txt'),
         ]
     c['agg_res_score'].append(targets[0])
+    return env.Command(
+        targets,
+        [
+            c['generate_data_gen'][0],
+        ],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def do_ipw_monitor(env, outdir, c):
+    cmd = [
+        'python run_script.py',
+        localenv['cluster'],
+        '${TARGETS[0]}',
+        'do_cusum_ipw_monitor.py',
+        '--seed',
+        123 + c['seed'],
+        '--n-calib',
+        c['init_calib'],
+        '--batch-size',
+        c['batch_size'],
+        '--particles',
+        10, #min(40, 4 * c['batch_size']),
+        '--max-time',
+        int(c['tot_size_factor'] * c['init_calib']),
+        '--confounder-start',
+        SIM_SETTINGS[c['setting']]['start_confounder'],
+        '--confounder-end',
+        SIM_SETTINGS[c['setting']]['end_confounder'],
+        '--alarm-rate',
+        ALARM_RATE,
+        '--data-gen ${SOURCES[0]}',
+        '--out-chart ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+    ]
+    targets = [
+            join(outdir, 'res_ipw_lr.csv'),
+            join(outdir, 'log_ipw.txt'),
+        ]
+    c['agg_res_ipw'].append(targets[0])
     return env.Command(
         targets,
         [
@@ -275,6 +316,35 @@ def plot_score(env, outdir, c):
         c['agg_res_score'],
         ' '.join(map(str, cmd)))
 
+@nest.add_target_with_env(localenv)
+def plot_ipw(env, outdir, c):
+    res = '+'.join([join('simulation_null_score', a) for a in c['agg_res_ipw']])
+    cmd = [
+        'python plot_simulation_shift.py',
+        '--alarm',
+        ALARM_RATE,
+        '--result-files',
+        res,
+        '--monitor-time',
+        int(c['tot_size_factor'] * c['init_calib']),
+        '--csv ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+	    '--plot ${TARGETS[2]}',
+        ]
+    targets = [
+            join(outdir, 'alert_times_ipw.csv'),
+            join(outdir, 'log_agg_ipw.txt'),
+            join(outdir, 'plot_null_ipw.png'),
+        ]
+    c['agg_res_ipw_overlay'].append({
+        "label": str(c['init_calib']),
+        "target": targets[0]})
+
+    return env.Command(
+        targets,
+        c['agg_res_ipw'],
+        ' '.join(map(str, cmd)))
+
 nest.pop("init_calib")
 
 @nest.add_target_with_env(localenv)
@@ -306,4 +376,35 @@ def plot_score_overlay(env, outdir, c):
             join(outdir, 'plot_alarms_score_overlay.png'),
         ],
         [a['target'] for a in c['agg_res_score_overlay']],
+        ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def plot_ipw_overlay(env, outdir, c):
+    if NUM_REPS <= 1:
+        return
+    res = '+'.join([join('simulation_null_score', a['target']) for a in c['agg_res_ipw_overlay']])
+    labels = ",".join([a['label'] for a in c['agg_res_ipw_overlay']])
+    cmd = [
+        'python plot_simulation_shift_overlay.py',
+        '--aggregate-files',
+        res,
+        '--label-title',
+        'm',
+        '--labels',
+        labels,
+        '--alarm-rate',
+        ALARM_RATE,
+        '--standardize-x',
+        '--monitor-time',
+        ",".join([str(c['tot_size_factor'] * calib_size) for calib_size in SIM_SETTINGS[c['setting']]['calibs']]),
+        '--log ${TARGETS[0]}',
+	    '--plot ${TARGETS[1]}',
+        ]
+
+    return env.Command(
+        [
+            join(outdir, 'log_agg_ipw_overlay.txt'),
+            join(outdir, 'plot_alarms_ipw_overlay.png'),
+        ],
+        [a['target'] for a in c['agg_res_ipw_overlay']],
         ' '.join(map(str, cmd)))

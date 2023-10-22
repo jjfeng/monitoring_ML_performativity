@@ -80,7 +80,6 @@ def main():
         if os.path.exists(res_file):
             res = pd.read_csv(res_file)
             method_str = res["method"][0]
-            # print(res)
             obs_cusums.append(res["chart_obs"].iloc[-1])
             raw_alert_idxs = np.where(
                 np.bitwise_or(
@@ -138,6 +137,10 @@ def main():
         "BAD alarm rate (95 se) %f",
         1.96
         * np.sqrt(bad_alert_freq * (1 - bad_alert_freq) / agg_alert_tot_times.size),
+    )
+    logging.info(
+        "median alert time %f",
+        np.median([a for a in agg_alert_tot_times if np.isfinite(a)]),
     )
     logging.info(
         "average alert time %f",

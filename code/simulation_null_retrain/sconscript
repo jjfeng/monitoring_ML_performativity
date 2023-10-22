@@ -41,6 +41,7 @@ SIM_SETTINGS = {
         "model_type": 'ridge',
     },
 }
+
 REFIT_FREQ = 20
 ALARM_RATE = 0.1
 NUM_REPS = 200
@@ -48,6 +49,15 @@ NUM_REPS = 200
 nest.add(
     'family',
     ["bernoulli"])
+
+nest.add(
+    'refit_freq',
+    [
+        #None,
+        REFIT_FREQ   
+    ],
+    label_func=lambda c: "refit_%s" % str(c),
+)
 
 nest.add(
     'setting',
@@ -112,8 +122,7 @@ def generate_init_mdl(env, outdir, c):
         '--pre-beta',
         pre_beta,
         '--test-size %d' % SIM_SETTINGS[c['setting']]['test_size'] if SIM_SETTINGS[c['setting']]['test_size'] else '',
-        '--refit-freq',
-        REFIT_FREQ,
+        '--refit-freq %d' % c['refit_freq'] if c['refit_freq'] is not None else '',
         '--max-train',
         0,
         '--n-train',
@@ -190,8 +199,20 @@ nest.add(
     [10],
     label_func=lambda c: "batch_%d" % c)
 
+nest.add_aggregate('agg_res_overlay', list)
 nest.add_aggregate('agg_res_score_overlay', list)
+nest.add_aggregate('agg_res_ipw_overlay', list)
 nest.add_aggregate('agg_res_bayes_overlay', list)
+
+nest.add(
+    'bayes_alarm_rate',
+    [
+        0.15,
+        #0.2
+    ],
+    label_func=lambda c: "alarm_rate_%.2f" % c,
+)
+
 nest.add(
     'shift_scale',
     [
@@ -222,6 +243,7 @@ nest.add(
     ])
 
 nest.add_aggregate('agg_res_score', list)
+nest.add_aggregate('agg_res_ipw', list)
 nest.add_aggregate('agg_res_bayes', list)
 nest.add_aggregate('agg_res_aucs', list)
 nest.add(
@@ -241,8 +263,8 @@ def do_score_monitor(env, outdir, c):
         123 + c['seed'],
         '--norm',
         c['norm'],
-        '--oracle',
-        c['oracle'],
+        #'--oracle',
+        #c['oracle'],
         '--max-look',
         c['max_look_back']//c['batch_size'],
         '--n-calib',
@@ -279,59 +301,59 @@ def do_score_monitor(env, outdir, c):
         ],
         ' '.join(map(str, cmd)))
 
-@nest.add_target_with_env(localenv)
-def get_auc(env, outdir, c):
-    if c['seed'] > 2:
-        return
+# @nest.add_target_with_env(localenv)
+# def get_auc(env, outdir, c):
+#     if c['seed'] > 2:
+#         return
 
-    cmd = [
-        'python run_script.py',
-        localenv['cluster'],
-        '${TARGETS[0]}',
-        'plot_roc_chart.py',
-    	'--data-gen ${SOURCES[0]}',
-    	'--mdl ${SOURCES[1]}',
-    	'--out-auc ${TARGETS[0]}',
-        ]
-    targets = [
-            join(outdir, 'aucs.csv'),
-        ]
-    c['agg_res_aucs'].append(targets[0])
-    return env.Command(
-        targets,
-        [
-            c['generate_data_gen'][0],
-            c['do_score_monitor'][1],
-        ],
-        ' '.join(map(str, cmd)))
+#     cmd = [
+#         'python run_script.py',
+#         localenv['cluster'],
+#         '${TARGETS[0]}',
+#         'plot_roc_chart.py',
+#     	'--data-gen ${SOURCES[0]}',
+#     	'--mdl ${SOURCES[1]}',
+#     	'--out-auc ${TARGETS[0]}',
+#         ]
+#     targets = [
+#             join(outdir, 'aucs.csv'),
+#         ]
+#     c['agg_res_aucs'].append(targets[0])
+#     return env.Command(
+#         targets,
+#         [
+#             c['generate_data_gen'][0],
+#             c['do_score_monitor'][1],
+#         ],
+#         ' '.join(map(str, cmd)))
 
-@nest.add_target_with_env(localenv)
-def plot_risk_v_pred(env, outdir, c):
-    if c['seed'] >= 5:
-        return
+# @nest.add_target_with_env(localenv)
+# def plot_risk_v_pred(env, outdir, c):
+#     if c['seed'] >= 5:
+#         return
 
-    cmd = [
-        'python plot_risk_v_pred.py',
-        '--plot-mod',
-        50,
-        '--test-size',
-        10000,
-        '--scale',
-        'risk,logit',
-        '--data-gen ${SOURCES[0]}',
-        '--mdls ${SOURCES[1]}',
-        '--plot ${TARGETS[0]}',
-    ]
-    targets = [
-            join(outdir, 'calibration.png'),
-        ]
-    return env.Command(
-        targets,
-        [
-            c['generate_data_gen'][0],
-            c['do_score_monitor'][1],
-        ],
-        ' '.join(map(str, cmd)))
+#     cmd = [
+#         'python plot_risk_v_pred.py',
+#         '--plot-mod',
+#         50,
+#         '--test-size',
+#         10000,
+#         '--scale',
+#         'risk,logit',
+#         '--data-gen ${SOURCES[0]}',
+#         '--mdls ${SOURCES[1]}',
+#         '--plot ${TARGETS[0]}',
+#     ]
+#     targets = [
+#             join(outdir, 'calibration.png'),
+#         ]
+#     return env.Command(
+#         targets,
+#         [
+#             c['generate_data_gen'][0],
+#             c['do_score_monitor'][1],
+#         ],
+#         ' '.join(map(str, cmd)))
 
 
 @nest.add_target_with_env(localenv)
@@ -383,7 +405,7 @@ def do_monitor_bayes(env, outdir, c):
         '--prior-shift-factor',
         0.5,
         '--alarm-rate',
-        ALARM_RATE,
+        c['bayes_alarm_rate'],
         '--data-gen ${SOURCES[0]}',
         '--temp-file',
         join("simulation_null_retrain", outdir, 'tmp.json'),
@@ -401,6 +423,49 @@ def do_monitor_bayes(env, outdir, c):
             c['generate_data_gen'][0],
         ],
         ' '.join(map(str, cmd)))
+
+@nest.add_target_with_env(localenv)
+def do_ipw_monitor(env, outdir, c):
+    if c['shift_scale'] == 'risk':
+        return
+    
+    cmd = [
+        'python run_script.py',
+        localenv['cluster'],
+        '${TARGETS[0]}',
+        'do_cusum_ipw_monitor.py',
+        '--seed',
+        123 + c['seed'],
+        '--n-calib',
+        SIM_SETTINGS[c['setting']]['init_calib'],
+        '--batch-size',
+        c['batch_size'],
+        '--particles',
+        5,
+        '--max-time',
+        int(c['tot_size_factor'] * SIM_SETTINGS[c['setting']]['init_calib']),
+        '--confounder-start',
+        SIM_SETTINGS[c['setting']]['start_confounder'],
+        '--confounder-end',
+        SIM_SETTINGS[c['setting']]['end_confounder'],
+        '--alarm-rate',
+        ALARM_RATE,
+        '--data-gen ${SOURCES[0]}',
+        '--out-chart ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+    ]
+    targets = [
+            join(outdir, 'res_ipw.csv'),
+            join(outdir, 'log_ipw.txt'),
+        ]
+    c['agg_res_ipw'].append(targets[0])
+    return env.Command(
+        targets,
+        [
+            c['generate_data_gen'][0],
+        ],
+        ' '.join(map(str, cmd)))
+
 
 nest.pop("seed")
 
@@ -448,8 +513,8 @@ def plot_score(env, outdir, c):
             join(outdir, 'log_agg_score.txt'),
             join(outdir, 'plot_null_score.png'),
         ]
-    c['agg_res_score_overlay'].append({
-        "label": c['shift_scale'].capitalize(),
+    c['agg_res_overlay'].append({
+        "label": f"ScoreCUSUM_{c['shift_scale'].capitalize()}",
         "target": targets[0]})
     return env.Command(
         targets,
@@ -479,22 +544,53 @@ def plot_bayes(env, outdir, c):
             join(outdir, 'log_agg_bayes.txt'),
             join(outdir, 'plot_null_bayes.png'),
         ]
-    c['agg_res_bayes_overlay'].append({
-        "label": c['shift_scale'].capitalize(),
+    c['agg_res_overlay'].append({
+        "label": f"Bayes_{c['shift_scale'].capitalize()}",
         "target": targets[0]})
     return env.Command(
         targets,
         c['agg_res_bayes'],
         ' '.join(map(str, cmd)))
 
+@nest.add_target_with_env(localenv)
+def plot_ipw(env, outdir, c):
+    if len(c['agg_res_ipw']) <= 1:
+        return 
+
+    res = '+'.join([join('simulation_null_retrain', a) for a in c['agg_res_ipw']])
+    cmd = [
+        'python plot_simulation_shift.py',
+        '--alarm',
+        ALARM_RATE,
+        '--result-files',
+        res,
+        '--monitor-time',
+        int(c['tot_size_factor'] * SIM_SETTINGS[c['setting']]['init_calib']),
+        '--csv ${TARGETS[0]}',
+        '--log ${TARGETS[1]}',
+	    '--plot ${TARGETS[2]}',
+        ]
+    targets = [
+            join(outdir, 'ipw_alert_times.csv'),
+            join(outdir, 'log_agg_ipw.txt'),
+            join(outdir, 'plot_null_ipw.png'),
+        ]
+    c['agg_res_overlay'].append({
+        "label": f"IPW_CUSUM",
+        "target": targets[0]})
+    return env.Command(
+        targets,
+        c['agg_res_ipw'],
+        ' '.join(map(str, cmd)))
+
 nest.pop("shift_scale")
 
 @nest.add_target_with_env(localenv)
-def plot_score_overlay(env, outdir, c):
+def plot_overlay(env, outdir, c):
     if NUM_REPS <= 1:
         return
-    res = '+'.join([join('simulation_null_retrain', a['target']) for a in c['agg_res_score_overlay']])
-    labels = ",".join([a['label'] for a in c['agg_res_score_overlay']])
+    res = '+'.join([join('simulation_null_retrain', a['target']) for a in c['agg_res_overlay']])
+    labels = ",".join([a['label'] for a in c['agg_res_overlay']])
     cmd = [
         'python plot_simulation_shift_overlay.py',
         '--aggregate-files',
@@ -502,53 +598,23 @@ def plot_score_overlay(env, outdir, c):
         '--shift-time',
         810, # this is just to make sure we dont plot the desired false alarm rate
         '--label-title',
-        '"Shift scale"',
+        '"Procedures"',
         '--labels',
         labels,
         '--alarm-rate',
         ALARM_RATE,
         '--monitor-time',
-        ",".join(["800"] * len(c['agg_res_score_overlay'])),
+        ",".join(["800"] * len(c['agg_res_overlay'])),
+        '--title',
+        'Ridge_LR' if 'ridge' in c['setting'] else 'GBT',
         '--log ${TARGETS[0]}',
 	    '--plot ${TARGETS[1]}',
         ]
 
     return env.Command(
         [
-            join(outdir, 'log_agg_score_overlay.txt'),
-            join(outdir, 'plot_alarms_score_overlay.png'),
+            join(outdir, 'log_agg_overlay.txt'),
+            join(outdir, 'plot_alarms_overlay.png'),
         ],
-        [a['target'] for a in c['agg_res_score_overlay']],
-        ' '.join(map(str, cmd)))
-
-@nest.add_target_with_env(localenv)
-def plot_bayes_overlay(env, outdir, c):
-    if NUM_REPS <= 1:
-        return
-    res = '+'.join([join('simulation_null_retrain', a['target']) for a in c['agg_res_bayes_overlay']])
-    labels = ",".join([a['label'] for a in c['agg_res_bayes_overlay']])
-    cmd = [
-        'python plot_simulation_shift_overlay.py',
-        '--aggregate-files',
-        res,
-        '--shift-time',
-        810, # this is just to make sure we dont plot the desired false alarm rate
-        '--label-title',
-        '"Shift scale"',
-        '--labels',
-        labels,
-        '--alarm-rate',
-        ALARM_RATE,
-        '--monitor-time',
-        ",".join(["800"] * len(c['agg_res_bayes_overlay'])),
-        '--log ${TARGETS[0]}',
-	    '--plot ${TARGETS[1]}',
-        ]
-
-    return env.Command(
-        [
-            join(outdir, 'log_agg_bayes_overlay.txt'),
-            join(outdir, 'plot_alarms_bayes_overlay.png'),
-        ],
-        [a['target'] for a in c['agg_res_bayes_overlay']],
+        [a['target'] for a in c['agg_res_overlay']],
         ' '.join(map(str, cmd)))

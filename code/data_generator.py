@@ -221,7 +221,6 @@ class PreloadedDataGenerator(DataGenerator):
         return self.monitor_data.size
 
     def generate_data(self, n: int, curr_time: int) -> Dataset:
-        raise NotImplementedError("OOPS not yet")
         if curr_time < 0:
             return self.calib_data
         

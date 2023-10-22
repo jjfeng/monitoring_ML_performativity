@@ -413,10 +413,6 @@ class ScoreMonitor(RecalibMonitor):
                 if self.halt_when_alarm:
                     break
 
-            # For model retraining, we need a separate data stream
-            new_retrain_data = self.data_gen.generate_training_data(
-                n=self.batch_size,
-                curr_time=t)
-            self.data_gen.mdl_dev.update_fit(new_retrain_data)
+            self.data_gen.mdl_dev.update_fit(new_data)
 
         return hist_logger

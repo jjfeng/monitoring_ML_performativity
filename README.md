@@ -1,4 +1,4 @@
-# Companion code for the manuscript "Monitoring machine learning (ML)-based risk prediction algorithms in the presence of confounding medical interventions"
+# Companion code for the manuscript "Monitoring machine learning (ML)-based risk prediction algorithms in the presence of performativity"
 
 ## Installation instructions
 * This code is designed for running with pip. Packages are listed in requirements.txt.

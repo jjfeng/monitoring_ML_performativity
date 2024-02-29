@@ -1,5 +1,7 @@
 # Companion code for the manuscript "Monitoring machine learning (ML)-based risk prediction algorithms in the presence of performativity"
 
+To appear in AISTATS 2024
+
 ## Installation instructions
 * This code is designed for running with pip. Packages are listed in requirements.txt.
 * To run the Bayesian changepoint monitoring procedure, install cmdstanpy and stan.
